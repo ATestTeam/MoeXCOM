@@ -30,7 +30,7 @@ password: (Pseudocode)
 ```python
 import base64
 import xxhash
-from mt19937 import MT19937 # pip install mt19937
+import numpy as np
 
 # Get list from files/TableBundles/TableCatalog.json
 table_catalog = {...} # assume this is a dictionary mapping file IDs to filenames
@@ -41,8 +41,8 @@ def unpack_table_bundle(file_id):
 
     # create password for zip file using xxHash32 and Mersenne Twister RNG
     key = xxhash.xxh32(filename.encode()).intdigest()
-    mt = MT19937(key)
-    password = base64.b64encode(mt.random_bytes(15)).decode()
+    mt = np.random.MT19937(key)
+    password = base64.b64encode(mt.random_raw(15)).decode()
 
     # TODO: extract contents of the password-protected zip file using the password
 
