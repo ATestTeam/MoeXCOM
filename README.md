@@ -27,18 +27,26 @@ Get list from files/TableBundles/TableCatalog.json
 stored file name: xxHash64(zip-original-name), etc: `3622299440866786438` => `Excel.zip`
 
 password: (Pseudocode)
-```go
-pass := base64.RawStdEncoding.EncodeToString(
-  CreateKey(
-    xxHash32.Checksum([]byte(archive.Name), 0)
-    , 15)
-  )
-func CreateKey(key uint32, length int) []byte {
-  mt := newMersenneTwister(key)
-  buf := make([]byte, length)
-  mt.Read(buf)
-  return buf
-}
+```python
+import base64
+import xxhash
+from mt19937 import MT19937 # pip install mt19937
+
+# Get list from files/TableBundles/TableCatalog.json
+table_catalog = {...} # assume this is a dictionary mapping file IDs to filenames
+
+def unpack_table_bundle(file_id):
+    # retrieve original filename from file ID using xxHash64
+    filename = xxhash.xxh64(str(file_id).encode()).hexdigest() + '.zip'
+
+    # create password for zip file using xxHash32 and Mersenne Twister RNG
+    key = xxhash.xxh32(filename.encode()).intdigest()
+    mt = MT19937(key)
+    password = base64.b64encode(mt.random_bytes(15)).decode()
+
+    # TODO: extract contents of the password-protected zip file using the password
+
+    return contents
 ```
 
 See IDA function `TableService$$LoadBytes`
@@ -48,75 +56,87 @@ See IDA function `TableService$$LoadBytes`
 Ref: [FlatBuffers](https://google.github.io/flatbuffers)  
 .fbs from il2cppDumper: [here](unpack.fbs), the generator will provided if needs  
 unpack steps: (partial code, issue welcome if full-code needed)  
-```go
-loadFlatBuffer(new(flat.ScenarioCharacterNameExcelTable))
+```python
+import os
+import struct
+import json
+import base64
+import xxhash
+import flatbuffers # pip install flatbuffers
 
-func loadFlatBuffer[T flatbuffers.FlatBuffer](table T) (T, []byte) {
-  name := reflect.TypeOf(table).Elem().Name() // "ScenarioCharacterNameExcelTable"
-  data, err := os.ReadFile(strings.ToLower(name) + ".bytes")
-  if err != nil {
-    panic(err)
-  }
-  _key := CreateKey(xxHash32.Checksum([]byte(name), 0), len(data))
-  arr := bArrAsU64Arr(data)
-  key := bArrAsU64Arr(_key)
-  for i := range arr {
-    arr[i] ^= key[i]
-  }
-  for i := len(data) - len(data)%8; i < len(data); i++ {
-    data[i] ^= _key[i]
-  }
-  flatbuffers.GetRootAs(data, 0, table)
-  return table, CreateKeyByString(strings.ReplaceAll(name, "ExcelTable", ""), 8)
+# Define FlatBuffer schema
+# The flatbuffers schema is not shown in the original code, so this is just a placeholder
+SCHEMA = """\
+table ScenarioCharacterNameExcelTable {
+  name: string;
+  id: int;
 }
+"""
+
+# Define decryption functions
+def create_key(name: str, length: int) -> bytes:
+    key = xxhash.xxh32(name.encode()).intdigest()
+    arr = bytearray(struct.pack(f'{len(name)}sI', name.encode(), key))
+    mt = MT19937(key)
+    for i in range(length):
+        arr.append(mt.extract_number() & 0xff)
+    return bytes(arr)
+
+def b_arr_as_u64_arr(b_arr: bytes) -> list[int]:
+    return list(struct.unpack(f'{len(b_arr) // 8}Q', b_arr))
+
+def decode_any_scalar(v: int, key: bytes) -> int:
+    if v == 0:
+        return v
+    if isinstance(v, int):
+        if v.bit_length() <= 32:
+            v ^= b_arr_as_any_first_uint32(key)
+        else:
+            v ^= b_arr_as_any_first_uint64(key)
+    return v
+
+def decode_str(data: bytes, key: bytes) -> str:
+    if not data:
+        return '""'
+    raw = base64.standard_b64decode(data)
+    xor(raw, key)
+    decoded = ''.join(chr(c) for c in struct.unpack(f'{len(raw) // 2}H', raw))
+    return json.dumps(decoded)
+
+def xor(b_arr: bytearray, key: bytes) -> None:
+    for i, b in enumerate(b_arr):
+        b_arr[i] = b ^ key[i % len(key)]
+
+
+# Load data from file
+class ScenarioCharacterNameExcelTable:
+    def __init__(self, name: str = '', id: int = 0):
+        self.name = name
+        self.id = id
+
+table = ScenarioCharacterNameExcelTable()
+name = type(table).__name__ # "ScenarioCharacterNameExcelTable"
+data = open(name.lower() + '.bytes', 'rb').read()
+key = create_key(name, len(data))
+
+# Decrypt data
+arr = b_arr_as_u64_arr(data)
+key_arr = b_arr_as_u64_arr(key)
+for i in range(len(arr)):
+    arr[i] ^= key_arr[i]
+for i in range(len(data) - len(data) % 8, len(data)):
+    data[i] ^= key[i % len(key)]
+    
+# Deserialize data using FlatBuffers
+table = flatbuffers.binary_readers.read_object(arr, table, SCHEMA)
+
+# Decrypt values in table
+table.name = decode_str(table.name.encode(), create_key_by_string(name.replace('ExcelTable', ''), 8))
+table.id = decode_any_scalar(table.id, key)
+
+print(table.name, table.id)
 ```
-then decrypt value by those:
-```go
-func decodeAnyScalar[T any](v T, key []byte) T {
-	size := unsafe.Sizeof(v)
-	if size < 4 {
-		return v
-	}
-	switch size {
-	case 4:
-		if *(*uint32)(unsafe.Pointer(&v)) != 0{
-			*(*uint32)(unsafe.Pointer(&v)) ^= bArrAsAnyFirst[uint32](key)
-		}
-	case 8:
-		if *(*uint64)(unsafe.Pointer(&v)) != 0{
-			*(*uint64)(unsafe.Pointer(&v)) ^= bArrAsAnyFirst[uint64](key)
-		}
-	default:
-		b := asArray(unsafe.Pointer(&v), size)
-		h := false
-		for i := range b {
-			if b[i] != 0 {
-				h = true
-				break
-			}
-		}
-		if h {
-			for i := range b {
-				b[i] ^= key[i]
-			}
-		}
-	}
-	return v
-}
 
-func decodeStr(data []byte, key []byte) string {
-	if len(data) == 0 {
-		return `""`
-	}
-	raw, err := base64.StdEncoding.DecodeString(string(data))
-	if err != nil {
-		panic(err)
-	}
-	Xor(raw, key)
-	d, _ := json.Marshal(string(utf16.Decode(bArrAsU16Arr(raw))))
-	return string(d)
-}
-```
-
+Python code by ChatGPT
 
 # copyright Yostar
